@@ -1,6 +1,7 @@
 from os.path import join
 from os import environ, read, write
 from select import select
+from html import unescape
 
 from .resp import parse_responses, ResponseParsingError
 
@@ -126,7 +127,7 @@ class CoqConnection:
 
         while True:
             try:
-                data += self.raw_read()
+                data += unescape(self.raw_read())
                 print('RECV', data)
                 resps = parse_responses(data)
                 if condition(resps):
@@ -136,6 +137,7 @@ class CoqConnection:
 
 
     def call(self, c):
+        c.conn = self
         self.raw_write(c.to_string())
 
     def raw_write(self, s):
