@@ -1,6 +1,8 @@
 from os.path import join
-from os import environ, read
+from os import environ, read, write
 from select import select
+
+from .resp import parse_responses, ResponseParsingError
 
 import subprocess
 
@@ -50,6 +52,9 @@ class CoqConnection:
         """
         A connection can be initialized with or without a coqtop command.
         If coqtop is None, we automatically detect the command under PATH.
+
+        AVOID to use this method directly if you do not want to retry
+        connecting yourself. Use CoqConnection.connect instead.
         """
         version = None
 
@@ -97,16 +102,49 @@ class CoqConnection:
 
         # STEP 3. wait until a FEEDBACK message comes
         try:
-            self.waitfor_feedback()
+            resps = self.read_until(lambda resps: resps[-1].is_feedback())
         except TimeoutError:
             self.proc.kill()
             raise TimeoutError
 
         self.timeout = timeout
+        self.state_id = resps[-1].state_id
 
 
-    def waitfor_feedback(self):
-        print(self.raw_read())
+    def read_until(self, condition=lambda _:True):
+        """
+        the function reads a list of responses until a specified condition
+        is satisfied.
+
+        unfortunately, coq's xml protocol is not designed well enough, as a
+        result, sometimes it is not trivial to figure out when we should stop
+        reading. for example, when a coqtop instance is instalized and a new
+        definition is added, the stop-reading condition is different.
+        """
+        data = ""
+        resps = None
+
+        while True:
+            try:
+                data += self.raw_read()
+                print('RECV', data)
+                resps = parse_responses(data)
+                if condition(resps):
+                    return resps
+            except ResponseParsingError:
+                pass
+
+
+    def call(self, c):
+        self.raw_write(c.to_string())
+
+    def raw_write(self, s):
+        print('SEND', s)
+        _, prepared, _ = select([], [self.fin], [], self.timeout)
+        if self.fin in prepared:
+            write(self.fin, s)
+        else:
+            raise TimeoutError
 
 
     def raw_read(self):
@@ -118,11 +156,18 @@ class CoqConnection:
         prepared, _, _ = select([self.fout, self.ferr], [], [], self.timeout)
 
         if self.ferr in prepared:
-            # into error mode
+            # FIXME into error mode
             # usually this error is caused by encoding problems, i.e. not because
             # of wrong coq commands
-            pass
+            raise CoqConnectionError(read(self.ferr, 0x4000).decode())
         elif self.fout in prepared:
-            return read(self.fout, 0x4000)
+            return read(self.fout, 0x4000).decode()
         else:
             raise TimeoutError
+
+
+    def __repr__(self):
+        return "coq_connection @ %s, %s" % (
+                self.state_id,
+                self.proc
+                )
